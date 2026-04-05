@@ -1,303 +1,111 @@
-# Finance Data Processing & Access Control Backend
+# Finance Backend API - Zorvyn Assignment
 
-A Spring Boot backend for a finance dashboard system with role-based access control, financial records management, and analytics APIs.
+This is the backend implementation for the Finance Data Processing and Access Control assignment. I built this using **Spring Boot 3** and **Java 17**. 
+
+My goal with this project was to go beyond basic CRUD and showcase structural thinking, security, and production-ready practices like rate limiting and audit logging.
 
 ## Tech Stack
+- **Java 17 / Spring Boot 3.2.4**
+- **Spring Security (JWT)** for stateless authentication
+- **H2 Database** via Spring Data JPA (chosen for zero-config evaluation)
+- **Bucket4j** for API rate limiting
+- **JUnit 5 / Mockito** for unit testing
+- **Docker** for seamless deployment
 
-- **Java 17** + **Spring Boot 3.2.4**
-- **Spring Security** with JWT authentication
-- **Spring Data JPA** with **H2** (file-based) database
-- **Jakarta Bean Validation** for input validation
-- **SpringDoc OpenAPI** for auto-generated Swagger documentation
-- **Lombok** for reducing boilerplate
-- **Maven** for build management
+## Quick Start (How to Run)
 
-## Getting Started
+I wanted to make it as easy as possible to review this code, so you have two options:
 
-### Prerequisites
-- Java 17 or higher
-- Maven 3.8+ (or use the included Maven wrapper)
-
-### Run the Application
-
+**Option 1: Using Docker (Recommended)**
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd assignment
-
-# Build and run
-mvn spring-boot:run
+docker-compose up --build
 ```
 
-The server starts at `http://localhost:8080`.
+**Option 2: Using Maven**
+```bash
+./mvnw spring-boot:run
+```
 
-### Useful URLs
+Once running, the API will be available at `http://localhost:8080`.
 
-| URL | Description |
-|-----|-------------|
-| `http://localhost:8080/swagger-ui.html` | Swagger UI — interactive API docs |
-| `http://localhost:8080/h2-console` | H2 Database Console (JDBC URL: `jdbc:h2:file:./data/financedb`) |
+**Interactive API Documentation:**
+I've included Swagger UI so you can easily test the endpoints without needing Postman. Just head over to:
+[http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
 
-### Default Admin Credentials
-
-A default admin user is seeded on first startup:
-- **Email:** `admin@finance.com`
-- **Password:** `admin123`
+**Pre-seeded Data:**
+To save you time, the app automatically seeds some rich data on the first run:
+- **Admin**: `admin@finance.com` / `admin123`
+- **Analyst**: `analyst@finance.com` / `analyst123`
+- **Viewer**: `viewer@finance.com` / `viewer123`
+- Pre-seeded financial records going back a few months so the dashboard endpoints immediately return meaningful analytics.
 
 ---
 
-## Architecture
+## Architecture & Engineering Decisions
 
-```
-com.finance/
-├── config/          # Security config, JWT utility, data seeder
-├── controller/      # REST API controllers
-├── dto/
-│   ├── request/     # Incoming request DTOs with validation
-│   └── response/    # Outgoing response DTOs
-├── entity/          # JPA entities
-├── enums/           # Role, RecordType enums
-├── exception/       # Custom exceptions + global handler
-├── repository/      # Spring Data JPA repositories
-└── service/         # Business logic layer
-```
+Here are a few specific decisions I made while building this:
 
-### Design Principles
-- **Separation of Concerns**: Controllers handle HTTP, services handle business logic, repositories handle data access
-- **DTO Pattern**: Request/response objects separate API contracts from internal entities
-- **Global Exception Handling**: `@ControllerAdvice` ensures consistent error JSON across all endpoints
-- **Stateless Auth**: JWT tokens — no server-side session storage
+### 1. Role-Based Access Control (RBAC)
+Instead of hardcoding checks into the services, I used Spring Security's `@PreAuthorize` at the controller level. This makes the security boundaries very explicit:
+- `Viewer`: Can only access the dashboard metrics.
+- `Analyst`: Can view records and dashboard metrics contextually.
+- `Admin`: Full CRUD over records and user management.
+
+### 2. Soft Deletion
+Financial data shouldn't be permanently deleted for compliance reasons. I added an `isDeleted` flag to the `FinancialRecord` entity. Deleting a record hides it from all queries using JPA `@Query` rules, rather than issuing a SQL `DELETE`.
+
+### 3. Audit & Request Logging
+I wanted to ensure traceability:
+- **Audit Logging**: Any time an Admin creates, updates, or deletes a record or user, an `AuditLog` is saved tracking the action, the entity ID, and exactly who performed it.
+- **Request Interceptor**: I wrote a `OncePerRequestFilter` to log every API request, tracking the HTTP method, endpoint, response status, and processing time.
+
+### 4. Rate Limiting protection
+To protect the dashboard APIs against abuse, I integrated `Bucket4j`. All APIs are intercepted by a `RateLimitFilter` giving a simple sliding window allowance (100 requests per minute per IP). Exceeding this returns a `429 Too Many Requests` response.
+
+### 5. Big Decimal for Currency
+Floating-point precision errors (like $0.1 + $0.2 != $0.3) are a classic mistake in finance apps. I used `BigDecimal` for all monetary amounts to ensure calculations are absolutely strict.
+
+### 6. Centralized Error Handling
+Instead of throwing raw stack traces, I wrote a `@ControllerAdvice` global exception handler. Whether it's a 404 (Resource Not Found), a 400 (Validation failure), or a 403 (Access Denied), the backend consistently returns a standard JSON envelope:
+```json
+{
+  "success": false,
+  "message": "Meaningful error message here."
+}
+```
 
 ---
 
-## API Documentation
+## API Overview
+
+If you prefer testing manually, here are the core routes:
 
 ### Authentication
+- `POST /api/auth/register` - Create a new user account
+- `POST /api/auth/login` - Authenticate and get JWT
 
-#### POST `/api/auth/register`
-Register a new user (defaults to VIEWER role).
+### Financial Records (Admin/Analyst)
+- `POST /api/records` - Create an income/expense record
+- `GET /api/records` - List records. Supports filtering (`?type=INCOME&category=Salary&startDate=...`) and pagination (`?page=0&size=10`).
+- `PUT /api/records/{id}` - Update record
+- `DELETE /api/records/{id}` - Soft delete a record
 
-```json
-// Request
-{
-  "name": "John Doe",
-  "email": "john@example.com",
-  "password": "password123"
-}
-
-// Response (201)
-{
-  "success": true,
-  "message": "User registered successfully",
-  "data": {
-    "token": "eyJhbGciOiJIUz...",
-    "type": "Bearer",
-    "email": "john@example.com",
-    "name": "John Doe",
-    "role": "VIEWER"
-  }
-}
-```
-
-#### POST `/api/auth/login`
-```json
-// Request
-{
-  "email": "admin@finance.com",
-  "password": "admin123"
-}
-
-// Response (200)
-{
-  "success": true,
-  "message": "Login successful",
-  "data": {
-    "token": "eyJhbGciOiJIUz...",
-    "type": "Bearer",
-    "email": "admin@finance.com",
-    "name": "System Admin",
-    "role": "ADMIN"
-  }
-}
-```
+### Dashboard Analytics
+- `GET /api/dashboard/summary` - Total net worth, income, expenses
+- `GET /api/dashboard/category-summary` - Grouped totals by category
+- `GET /api/dashboard/trends` - Montly breakdown
+- `GET /api/dashboard/recent` - Top 10 recent transactions
 
 ### User Management (Admin Only)
-
-All endpoints require `Authorization: Bearer <admin_token>`
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/users` | List all users |
-| GET | `/api/users/{id}` | Get user by ID |
-| PUT | `/api/users/{id}` | Update user role/status/name |
-| DELETE | `/api/users/{id}` | Delete user |
-
-#### PUT `/api/users/{id}` — Update user
-```json
-{
-  "name": "Updated Name",
-  "role": "ANALYST",
-  "isActive": true
-}
-```
-
-### Financial Records
-
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| POST | `/api/records` | Admin | Create record |
-| GET | `/api/records` | Admin, Analyst | List with filters & pagination |
-| GET | `/api/records/{id}` | Admin, Analyst | Get single record |
-| PUT | `/api/records/{id}` | Admin | Update record |
-| DELETE | `/api/records/{id}` | Admin | Soft-delete record |
-
-#### POST `/api/records` — Create record
-```json
-{
-  "type": "INCOME",
-  "category": "salary",
-  "amount": 5000.00,
-  "date": "2024-03-15",
-  "description": "Monthly salary"
-}
-```
-
-#### GET `/api/records` — Filtered listing
-Query Parameters:
-- `type` — `INCOME` or `EXPENSE`
-- `category` — filter by category name
-- `startDate` — ISO date (e.g., `2024-01-01`)
-- `endDate` — ISO date (e.g., `2024-12-31`)
-- `page` — page number (default: 0)
-- `size` — page size (default: 10)
-
-Example: `GET /api/records?type=INCOME&category=salary&page=0&size=5`
-
-### Dashboard / Analytics
-
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| GET | `/api/dashboard/summary` | All Authenticated | Total income, expenses, net balance |
-| GET | `/api/dashboard/category-summary` | Analyst, Admin | Category-wise breakdown |
-| GET | `/api/dashboard/trends` | Analyst, Admin | Monthly income/expense trends |
-| GET | `/api/dashboard/recent` | All Authenticated | Last 10 transactions |
+- `GET /api/users` - List all users
+- `PUT /api/users/{id}` - Change user role or active status
+- `DELETE /api/users/{id}` - Expel user
 
 ---
-
-## Role-Based Access Control (RBAC)
-
-Three roles with tiered permissions:
-
-| Action | Viewer | Analyst | Admin |
-|--------|--------|---------|-------|
-| View dashboard summary | ✅ | ✅ | ✅ |
-| View recent transactions | ✅ | ✅ | ✅ |
-| View financial records | ❌ | ✅ | ✅ |
-| View category/trend analytics | ❌ | ✅ | ✅ |
-| Create/Update/Delete records | ❌ | ❌ | ✅ |
-| Manage users | ❌ | ❌ | ✅ |
-
-**Implementation**: `@PreAuthorize` annotations on controller methods enforce role checks. The `JwtAuthFilter` extracts roles from JWT tokens and populates Spring Security context.
-
----
-
-## Error Handling
-
-All errors return consistent JSON:
-
-```json
-{
-  "success": false,
-  "message": "Error description"
-}
+## Running Tests
+I've included unit tests for the core service layers using JUnit 5 and Mockito to ensure the business logic is covered.
+```bash
+./mvnw test
 ```
 
-| Status | Scenario |
-|--------|----------|
-| 400 | Validation error (missing/invalid fields) |
-| 401 | Missing or invalid JWT token |
-| 403 | Insufficient role permissions |
-| 404 | Resource not found |
-| 409 | Duplicate resource (e.g., email already exists) |
-| 500 | Unexpected server error |
-
-Validation errors include field-level detail:
-```json
-{
-  "success": false,
-  "message": "Validation failed",
-  "data": {
-    "email": "Email must be valid",
-    "amount": "Amount must be greater than 0"
-  }
-}
-```
-
----
-
-## Assumptions & Design Decisions
-
-1. **H2 File-Based Database**: Chosen for zero-config setup. Data persists in `./data/financedb` across restarts. Easily switchable to PostgreSQL/MySQL by changing `application.properties`.
-
-2. **New users default to VIEWER role**: Only an Admin can promote users to ANALYST or ADMIN via the user management API.
-
-3. **Soft Delete for Records**: Financial records are not permanently deleted — they are flagged with `isDeleted = true`. This preserves audit trails.
-
-4. **Stateless JWT Authentication**: No server-side sessions. Each request must include a valid `Authorization: Bearer <token>` header.
-
-5. **BCrypt Password Hashing**: Industry-standard password hashing via Spring Security's `BCryptPasswordEncoder`.
-
-6. **BigDecimal for Amounts**: Avoids floating-point precision issues inherent in financial calculations.
-
-7. **Pagination**: Record listing uses Spring Data's `Pageable` for efficient data retrieval on large datasets.
-
----
-
-## Project Structure
-
-```
-src/main/java/com/finance/
-├── FinanceApplication.java              # Main entry point
-├── config/
-│   ├── DataSeeder.java                  # Seeds default admin user
-│   ├── JwtAuthFilter.java              # JWT authentication filter
-│   ├── JwtUtil.java                     # JWT token utility
-│   └── SecurityConfig.java             # Spring Security configuration
-├── controller/
-│   ├── AuthController.java             # POST /api/auth/register, /login
-│   ├── DashboardController.java        # GET /api/dashboard/*
-│   ├── RecordController.java           # CRUD /api/records
-│   └── UserController.java            # CRUD /api/users (admin)
-├── dto/
-│   ├── request/
-│   │   ├── LoginRequest.java
-│   │   ├── RecordRequest.java
-│   │   ├── RegisterRequest.java
-│   │   └── UpdateUserRequest.java
-│   └── response/
-│       ├── ApiResponse.java
-│       ├── AuthResponse.java
-│       ├── CategorySummary.java
-│       ├── DashboardSummary.java
-│       ├── MonthlyTrend.java
-│       ├── RecordResponse.java
-│       └── UserResponse.java
-├── entity/
-│   ├── FinancialRecord.java
-│   └── User.java
-├── enums/
-│   ├── RecordType.java
-│   └── Role.java
-├── exception/
-│   ├── DuplicateResourceException.java
-│   ├── GlobalExceptionHandler.java
-│   └── ResourceNotFoundException.java
-├── repository/
-│   ├── RecordRepository.java
-│   └── UserRepository.java
-└── service/
-    ├── AuthService.java
-    ├── DashboardService.java
-    ├── RecordService.java
-    └── UserService.java
-```
+Thanks for reviewing my code, I really enjoyed building this!
